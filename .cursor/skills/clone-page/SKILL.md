@@ -1,6 +1,6 @@
 ---
+name: clone-page
 description: Clone/replicate the visual design of a live webpage (DOM structure, CSS, colors, typography, assets) directly into this project's existing stack, using a local Playwright capture instead of a browser extension/ZIP. Use whenever the user asks to clone, copy, replicate, extract, or recreate a site/page/design/layout from a URL.
-alwaysApply: false
 ---
 
 # Clone Page — capture a live site and rebuild it in this project
@@ -8,7 +8,7 @@ alwaysApply: false
 Trigger phrases (pt-BR and en): "clona esse site", "clona essa página", "extrai o design de <url>",
 "copia o layout de <url>", "replica essa landing page", "clone this page", "recreate this design from <url>".
 
-This rule replaces the old two-step workflow (browser extension → export ZIP → paste into chat).
+This replaces the old two-step workflow (browser extension → export ZIP → paste into chat).
 Everything now happens in one pass, driven by you (the agent), with no manual download step.
 
 ## 0. Preconditions
@@ -17,9 +17,9 @@ Everything now happens in one pass, driven by you (the agent), with no manual do
   public reference/inspiration page. Never use this to bypass login, paywalls, or DRM — the
   capture script already refuses to touch authenticated/protected content and will just report it
   as unavailable. If the user's intent looks like evading access controls, stop and say so.
-- If `scripts/clone/node_modules` doesn't exist yet, install once:
+- If this project has no `node_modules/playwright` yet, install it once at the project root:
   ```
-  cd scripts/clone && npm install && npx playwright install chromium
+  npm install playwright && npx playwright install chromium
   ```
   (Only Chromium is needed — don't install the full browser matrix.)
 
@@ -28,7 +28,7 @@ Everything now happens in one pass, driven by you (the agent), with no manual do
 Run the capture script from the project root, pointing at the target URL:
 
 ```
-node scripts/clone/capture.mjs "<url>" clone-capture/<slug>
+node .cursor/skills/clone-page/scripts/capture.mjs "<url>" clone-capture/<slug>
 ```
 
 - Pick `<slug>` from the page (e.g. `air-inc-home`). If the user didn't give a target folder,
@@ -41,7 +41,7 @@ node scripts/clone/capture.mjs "<url>" clone-capture/<slug>
 
 ## 2. Read what was captured
 
-Read, in this order, from the output folder:
+Read, in this order, from the output folder (`clone-capture/<slug>/`):
 
 1. `capture-manifest.json` — run metadata and the honest **knownLimitations** list. Always carry
    these into your final report to the user; don't imply higher fidelity than what was captured.
@@ -71,9 +71,7 @@ Before writing anything, check what this project already is:
   Tailwind utilities and fall back to arbitrary-value classes (`w-[1240px]`, `top-[86px]`) for
   values with no close utility match, rather than approximating and drifting from the capture.
 - If it's a **plain HTML/CSS/JS project** (or an empty folder): generate static
-  `index.html` + `styles.css`, mirroring the DOM tree and computed styles closely — this is the
-  same shape as the extension's old `clone/index.html` output, just generated directly instead of
-  extracted from a ZIP.
+  `index.html` + `styles.css`, mirroring the DOM tree and computed styles closely.
 - If the user explicitly names a stack ("faz isso em Vue", "quero como componente React"), that
   instruction wins over what's auto-detected.
 - Never invent a framework that isn't already in the project unless the user asked for it.
@@ -104,8 +102,7 @@ Before writing anything, check what this project already is:
   pixel-perfect match.
 - Summarize for the user: what was captured and reconstructed faithfully, and what's listed under
   `capture-manifest.json`'s `knownLimitations` (canvas/WebGL, DRM/auth video, cross-origin CSS,
-  closed shadow roots, budget-omitted nodes) so expectations stay honest — same spirit as this
-  project's own `AUDITORIA_EXTREMA_2026-06-23.md`: report real coverage, don't oversell.
+  closed shadow roots, budget-omitted nodes) so expectations stay honest.
 
 ## 6. Cleanup
 
