@@ -107,20 +107,27 @@ class, a design-token file). Don't invent additional structure or assets for a s
 **Otherwise** (whole-page or scoped-element capture), read, in this order, from the output folder
 (`clone-capture/<slug>/`):
 
-1. `capture-manifest.json` — run metadata, `scopedSelector` (null for whole-page captures), and
-   the honest **knownLimitations** list. Always carry these into your final report to the user;
-   don't imply higher fidelity than what was captured.
+1. `capture-manifest.json` — run metadata, `scopedSelector` (null for whole-page captures),
+   `recording` (path to the screen recording when one was made — null otherwise), and the honest
+   **knownLimitations** list. Always carry these into your final report to the user; don't imply
+   higher fidelity than what was captured.
 2. `layout.json`, `frameworks.json`, `typography.json`, `colors.json` — page-level facts that
    steer the reconstruction (detected stack, fonts, palette, viewport). Still page-wide even for a
    scoped capture — useful shared context (tokens, detected framework) for the one element too.
 3. `screenshots/full-page.png` and the `screenshots/checkpoint-*.png` files for whole-page
    context; `screenshots/element.png` (scoped captures only) is the tight crop of just the picked
    element — use it as the visual ground truth for that element specifically.
+   `recording/session.webm` (when present — see `capture-manifest.json`'s `recording` field) is a
+   real screen recording of the scroll-through session, the "grava vídeo da página" feature; use it
+   the same way you'd use the screenshots, as extra visual ground truth (e.g. to see scroll-triggered
+   animations play out), not as something to embed in the reconstructed output.
 4. `dom.json` — the structural source of truth (tag, attrs, computed `styles`, `rect`, children,
    text nodes, `::before`/`::after` as `pseudos`). For a scoped capture this is rooted at the
    picked element, not `<body>` — don't reconstruct the whole page when the user only asked for
    one component. Nodes with `omitted: true` mean the DOM budget was hit — call this out if it
-   affects a part that matters.
+   affects a part that matters. **`rect.x`/`rect.y` are page-absolute** (viewport position plus
+   scroll offset), the same coordinate space for every node no matter how deeply nested — see the
+   positioning guidance in step 4 before using them for CSS `top`/`left`.
 5. `css.json` — keyframes, custom properties (CSS variables), media query breakpoints, and every
    readable CSS rule (page-wide, not scoped — use it to resolve variables/keyframes the element's
    styles reference). `inaccessibleSheets` lists cross-origin stylesheets that couldn't be read.
@@ -177,6 +184,27 @@ box to that node's `rect.w` / `rect.h` (via width/height attributes, CSS width/h
 framework's Image component sizing) and match `styles.objectFit` / `styles.objectPosition` when
 present — never let the browser fall back to the downloaded file's native size.
 
+**Never flatten separate image layers into one — this is the #1 cause of "imagem grudada".** A
+container can have BOTH a CSS `background-image` (on `node.styles.backgroundImage`) AND its own
+`<img>` child or sibling (a separate node with its own `node.imageUrl` and `rect`) — these are two
+independent layers in the original page (e.g. a section background photo plus a featured/foreground
+image floating on top of it), captured as two structurally distinct things. When you see this,
+reconstruct BOTH: the background stays a `background-image`/`background-position`/`background-size`
+CSS property on its own element, and the foreground image stays a real, separately-positioned
+`<img>` (or `next/image`, etc.) using its own asset path from `assets-manifest.json` — do not merge
+them into a single flattened image or drop one in favor of the other because they visually overlap
+in the screenshot.
+
+**`dom.json`'s `rect.x`/`rect.y` are PAGE-ABSOLUTE coordinates, not parent-relative.** They're
+`element.getBoundingClientRect()` plus scroll offset — i.e. the position on the whole page, the same
+frame of reference for every node regardless of nesting. Do not copy `rect.x`/`rect.y` directly into
+a child's CSS `top`/`left` — for a `position: absolute`/`fixed`/`sticky` element (e.g. that
+overlaid foreground image), first check `node.styles.position`, then compute its offset RELATIVE TO
+ITS POSITIONED PARENT (parent's `rect.x`/`rect.y` subtracted from the child's), and give the parent
+`position: relative` if it doesn't already have positioning. For normally-flowed content (the common
+case), don't use absolute positioning from `rect` at all — reproduce it via normal document flow /
+flexbox / grid order instead, which is what keeps layered sections from collapsing into each other.
+
 - For a scoped capture (`--selector` was used), only create/edit the one component the user
   asked about — don't rebuild the surrounding page just because page-level `css.json`/
   `colors.json` were also read for context.
@@ -204,6 +232,9 @@ present — never let the browser fall back to the downloaded file's native size
 - Run/build the project (or open the generated static file) and take a screenshot or visually
   compare it against `screenshots/full-page.png` (or `screenshots/element.png` for a scoped
   capture). Note real differences instead of assuming a pixel-perfect match.
+- Check that every background-image + foreground-image pair you saw overlapping in the screenshot
+  actually rendered as two distinct layers in the output, not one merged/missing image — this is
+  the most common visual regression from this workflow.
 - Summarize for the user: what was captured and reconstructed faithfully, and what's listed under
   `capture-manifest.json`'s `knownLimitations` (canvas/WebGL, DRM/auth video, cross-origin CSS,
   closed shadow roots, budget-omitted nodes) so expectations stay honest.

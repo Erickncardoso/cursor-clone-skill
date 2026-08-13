@@ -34,15 +34,35 @@ próprio.
 npm install github:Erickncardoso/cursor-clone-skill
 ```
 
-Sem precisar copiar arquivo nenhum manualmente — o npm baixa direto do repo. Pra atualizar a
-skill depois, é só dar push de novo no repo e rodar `npm install` de novo (ou `npm update
-cursor-clone-skill`) nos projetos que já têm ela instalada.
+Sem precisar copiar arquivo nenhum manualmente — o npm baixa direto do repo.
 
 Se preferir guardar um `.tgz` local em vez de puxar do GitHub toda vez (`npm pack` gera esse
 arquivo a partir deste código-fonte), também funciona:
 
 ```bash
 npm install ~/tools/cursor-clone-skill-1.0.0.tgz
+```
+
+## Atualizar a skill (depois de já instalada)
+
+Toda vez que uma correção for empurrada pro repo (`git push`), em cada projeto onde a skill já
+está instalada:
+
+```bash
+npm update cursor-clone-skill
+```
+
+Testei isso de verdade: o `npm install github:...` grava o commit exato do GitHub no
+`package-lock.json`; quando você roda `npm update`, o npm confere se o repo tem commit mais novo
+que o gravado e, se tiver, baixa e reinstala automaticamente (o `postinstall` roda de novo e
+copia os arquivos atualizados). Não precisa repetir o `npm install github:...` inteiro.
+
+Isso só funciona se a skill já estiver listada nas dependências do projeto (é o padrão do
+`npm install`, a menos que você tenha usado `--no-save`). Se o `postinstall` for pulado por algum
+motivo (ex.: `npm install --ignore-scripts`), rode manualmente:
+
+```bash
+npx cursor-clone-skill
 ```
 
 ## Depois de instalado
@@ -54,15 +74,6 @@ No chat do Cursor, dentro do projeto, peça naturalmente:
 ou invoque direto:
 
 > `/clone-page https://exemplo.com`
-
-## Reinstalar/atualizar manualmente
-
-Se o `postinstall` for pulado (ex.: `npm install --ignore-scripts`) ou você quiser rodar de novo
-depois de uma atualização:
-
-```bash
-npx cursor-clone-skill
-```
 
 ## Nota sobre tamanho
 

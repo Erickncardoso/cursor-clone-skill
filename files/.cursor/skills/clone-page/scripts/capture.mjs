@@ -31,6 +31,12 @@
 //   --styles-only              Combine with --selector: skip DOM tree/assets entirely, just
 //                              write element-styles.json with that element's computed styles.
 //                              Fast path for "só quero o estilo desse botão" requests.
+//   --video / --no-video      Force screen recording on/off. Default: ON for whole-page and
+//                              --selector captures (records the actual scroll-through of the
+//                              session as recording/session.webm — this is the "grava vídeo da
+//                              página" feature, a real screen recording, not a downloaded
+//                              <video> tag), OFF for --list-elements/--styles-only (those are
+//                              fast discovery/lookup paths and don't need a recording).
 //
 // Output layout (written under outDir, default ./clone-capture/<slug>-<ts>):
 //   capture-manifest.json   run metadata + honest limitations list
@@ -39,6 +45,7 @@
 //   dom.json                 DOM tree with computed styles (whole page, or just --selector's subtree)
 //   assets-manifest.json     originalUrl -> localPath map + failures (each entry tagged with kind)
 //   assets/<sha256>.<ext>    downloaded image/font/css/video bytes (streamed, not buffered)
+//   recording/session.webm   screen recording of the capture session (scroll-through), when enabled
 //   screenshots/checkpoint-*.png + full-page.png (+ element.png when --selector matches)
 //   elements.json             only in --list-elements mode: selector inventory for picking a target
 //   element-styles.json       only in --styles-only mode: just the computed styles of one element
@@ -46,7 +53,7 @@
 import { chromium } from 'playwright';
 import { captureInBrowser, listElementsInBrowser } from './browser-capture.mjs';
 import { createHash } from 'node:crypto';
-import { mkdir, writeFile, unlink, rename } from 'node:fs/promises';
+import { mkdir, writeFile, unlink, rename, copyFile, rm } from 'node:fs/promises';
 import { createWriteStream } from 'node:fs';
 import { Readable, Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
@@ -64,6 +71,7 @@ function parseArgs(argv) {
     url, outDir: null, viewport: '1440x900', steps: 6, downloadAssets: true,
     maxAssetBytes: 8_000_000, maxVideoBytes: 80_000_000, maxTotalBytes: 200_000_000, timeout: 45000,
     listElements: false, selector: null, stylesOnly: false,
+    recordVideo: true, videoFlagSet: false,
   };
   const args = maybeOutDir && !maybeOutDir.startsWith('--') ? [maybeOutDir, ...rest] : [maybeOutDir, ...rest].filter(Boolean);
   if (maybeOutDir && !maybeOutDir.startsWith('--')) flags.outDir = maybeOutDir;
@@ -82,6 +90,14 @@ function parseArgs(argv) {
     if (key === 'list-elements') flags.listElements = true;
     if (key === 'selector') flags.selector = val;
     if (key === 'styles-only') flags.stylesOnly = true;
+    if (key === 'no-video') { flags.recordVideo = false; flags.videoFlagSet = true; }
+    if (key === 'video') { flags.recordVideo = true; flags.videoFlagSet = true; }
+  }
+  // Discovery (--list-elements) and styles-only lookups are meant to be
+  // fast/cheap — don't record a video for them unless the user explicitly
+  // asked for one with --video.
+  if (!flags.videoFlagSet && (flags.listElements || flags.stylesOnly)) {
+    flags.recordVideo = false;
   }
   if (flags.stylesOnly && !flags.selector) {
     console.error('[clone] --styles-only requires --selector="<css>" — styles of what element?');
@@ -200,6 +216,40 @@ async function downloadAsset(url, outDir, budget, maxBytesForThisAsset) {
   }
 }
 
+// Closes the context (required to finalize the recorded video, if any) and
+// then the browser, moving the finished video from Playwright's internal
+// temp location into <outDir>/recording/session.webm. Safe to call whether
+// or not recordVideo was actually enabled for this context — page.video()
+// is null when it wasn't, so this just closes cleanly in that case.
+async function closeAndSaveVideo(browser, context, page, outDir) {
+  let videoRelPath = null;
+  try {
+    const video = page.video();
+    await context.close(); // must close the CONTEXT (not just the browser) to finalize the video file
+    if (video) {
+      const tmpPath = await video.path();
+      const destDir = path.join(outDir, 'recording');
+      await mkdir(destDir, { recursive: true });
+      const destPath = path.join(destDir, 'session.webm');
+      try {
+        await rename(tmpPath, destPath);
+      } catch {
+        // Cross-device temp dirs can make rename() fail (EXDEV) — copy+delete
+        // always works regardless of filesystem.
+        await copyFile(tmpPath, destPath);
+        await unlink(tmpPath).catch(() => {});
+      }
+      videoRelPath = 'recording/session.webm';
+    }
+  } catch (err) {
+    console.error(`[clone] video finalize warning: ${err.message}`);
+  } finally {
+    await rm(path.join(outDir, '.video-tmp'), { recursive: true, force: true }).catch(() => {});
+    await browser.close().catch(() => {});
+  }
+  return videoRelPath;
+}
+
 async function main() {
   const flags = parseArgs(process.argv.slice(2));
   const [vw, vh] = flags.viewport.split('x').map(Number);
@@ -207,6 +257,8 @@ async function main() {
 
   await mkdir(path.join(outDir, 'assets'), { recursive: true });
   await mkdir(path.join(outDir, 'screenshots'), { recursive: true });
+  const videoTmpDir = path.join(outDir, '.video-tmp');
+  if (flags.recordVideo) await mkdir(videoTmpDir, { recursive: true });
 
   console.log(`[clone] launching Chromium...`);
   const browser = await chromium.launch();
@@ -217,8 +269,18 @@ async function main() {
   // would ask for), which is what was producing visibly softer/smaller
   // images than the original site. Requesting 2x matches what a normal
   // laptop screen asks for and pulls the higher-resolution asset instead.
-  const context = await browser.newContext({ viewport: { width: vw || 1440, height: vh || 900 }, deviceScaleFactor: 2 });
+  const context = await browser.newContext({
+    viewport: { width: vw || 1440, height: vh || 900 },
+    deviceScaleFactor: 2,
+    // Screen recording of the actual capture session — this is what "grava
+    // vídeo da página" means (matching the original extension's tab-capture
+    // recording feature), distinct from downloading <video> tag files.
+    ...(flags.recordVideo
+      ? { recordVideo: { dir: videoTmpDir, size: { width: vw || 1440, height: vh || 900 } } }
+      : {}),
+  });
   const page = await context.newPage();
+  if (flags.recordVideo) console.log(`[clone] recording screen video of the capture session...`);
 
   const warnings = [];
   console.log(`[clone] navigating to ${flags.url}`);
@@ -255,7 +317,7 @@ async function main() {
   if (flags.listElements) {
     console.log(`[clone] listing clickable/notable elements...`);
     const elements = await page.evaluate(listElementsInBrowser);
-    await browser.close();
+    await closeAndSaveVideo(browser, context, page, outDir);
     await writeFile(path.join(outDir, 'elements.json'), JSON.stringify(elements, null, 2));
     console.log(`\n[clone] done. Found ${elements.length} candidate elements.\n  ${path.join(outDir, 'elements.json')}\n`);
     console.log(`[clone] next: look at elements.json + screenshots/full-page.png, pick the "selector" that matches what the user described, then re-run:`);
@@ -278,7 +340,7 @@ async function main() {
   try {
     captured = await page.evaluate(captureInBrowser, { selector: flags.selector, stylesOnly: flags.stylesOnly });
   } catch (err) {
-    await browser.close();
+    await closeAndSaveVideo(browser, context, page, outDir).catch(() => {});
     console.error(`[clone] capture failed: ${err.message}`);
     if (String(err.message).includes('selector_not_found')) {
       console.error(`[clone] run with --list-elements first to get a selector that actually exists on this page.`);
@@ -287,13 +349,14 @@ async function main() {
   }
 
   if (flags.stylesOnly) {
-    await browser.close();
+    await closeAndSaveVideo(browser, context, page, outDir);
     await writeFile(path.join(outDir, 'element-styles.json'), JSON.stringify(captured, null, 2));
     console.log(`\n[clone] done. Output written to:\n  ${path.join(outDir, 'element-styles.json')}\n`);
     return;
   }
 
-  await browser.close();
+  const videoPath = await closeAndSaveVideo(browser, context, page, outDir);
+  if (videoPath) console.log(`[clone] screen recording saved: ${path.join(outDir, videoPath)}`);
 
   let assetsManifest = { downloaded: false, entries: [] };
   if (flags.downloadAssets) {
@@ -330,10 +393,14 @@ async function main() {
     checkpoints: stepCount,
     domBudget: captured.domBudget,
     warnings,
+    recording: videoPath ? { path: videoPath, note: 'Screen recording of the scripted scroll-through session (not user interactions/hover/click states).' } : null,
     knownLimitations: [
       'Canvas/WebGL content is a best-effort raster snapshot only (toDataURL); scenes, shaders and buffers are not extracted.',
       'Cross-origin stylesheets that block cssRules() cannot be read; check css.json.inaccessibleSheets for what was skipped. Per-element computed styles in dom.json are NOT affected by this — they reflect the final rendered result regardless of stylesheet origin.',
       'Public <video>/<source> files and their posters ARE downloaded now (check assets-manifest.json, kind:"video") — only DRM-protected or authenticated streams still fail, reported as http_error/failed rather than silently skipped.',
+      videoPath
+        ? 'The screen recording (recording/session.webm) only covers the automated scroll-through used to trigger lazy content — it does not capture hover states, clicks, or other interactions a human would trigger.'
+        : 'No screen recording was produced for this run (disabled by default for --list-elements/--styles-only, or --no-video was passed) — re-run with --video to force one.',
       'Closed shadow roots are inaccessible by browser design and are not represented in dom.json.',
       'GSAP/Framer Motion/Lottie/scroll-library state reflects the DOM at capture time, not full timeline/animation logic.',
       'Nodes beyond the DOM budget (domBudget.omittedSubtrees) are marked but not expanded — re-run with a narrower page/section if this is non-zero and matters.',
