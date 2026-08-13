@@ -15,7 +15,8 @@
 // Canvas/WebGL are still best-effort snapshots only, same limitation the
 // original extension documents.
 
-export function captureInBrowser() {
+export function captureInBrowser(opts) {
+  const { selector = null, stylesOnly = false } = opts || {};
   const CRITICAL_STYLES = [
     'display', 'position', 'flexDirection', 'flexWrap', 'alignItems', 'justifyContent',
     'gridTemplateColumns', 'gridTemplateRows', 'gridColumn', 'gridRow', 'gap', 'columnGap', 'rowGap',
@@ -481,17 +482,129 @@ export function captureInBrowser() {
     return { headings, body: bodyType, topFamilies };
   }
 
+  // Resolve the capture root: the whole page (default) or a single picked
+  // element + its subtree, when the caller wants just one component/button/
+  // card instead of the entire page.
+  let root = document.body;
+  if (selector) {
+    root = document.querySelector(selector);
+    if (!root) {
+      throw new Error(`selector_not_found: no element matches "${selector}". Run --list-elements first to get a selector that actually exists on this page.`);
+    }
+  }
+
+  // "Just the style of this element" — skip DOM tree/assets/CSS entirely and
+  // return only what a targeted style tweak needs. Much faster than a full
+  // capture, and the obviously-correct shape for "pega só o estilo desse
+  // botão" style requests.
+  if (stylesOnly) {
+    const computed = getComputedStyle(root);
+    const rect = root.getBoundingClientRect();
+    const styles = {};
+    for (const prop of CRITICAL_STYLES) {
+      const val = computed[prop];
+      if (val && !SKIP_VALUES.has(val)) styles[prop] = val;
+    }
+    for (const prop of ['overflow', 'overflowX', 'overflowY']) {
+      if (computed[prop] && computed[prop] !== 'visible') styles[prop] = computed[prop];
+    }
+    const pseudos = {};
+    for (const which of ['::before', '::after']) {
+      try {
+        const ps = getComputedStyle(root, which);
+        if (ps && ps.content !== 'none') {
+          pseudos[which] = { content: ps.content, backgroundColor: ps.backgroundColor, backgroundImage: ps.backgroundImage, width: ps.width, height: ps.height };
+        }
+      } catch {}
+    }
+    return {
+      selector,
+      tag: root.tagName.toLowerCase(),
+      id: root.id || null,
+      classes: [...root.classList].join(' ') || null,
+      rect: { x: Math.round(rect.x), y: Math.round(rect.y + window.scrollY), w: Math.round(rect.width), h: Math.round(rect.height) },
+      styles,
+      pseudos,
+      textContent: (root.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 300),
+    };
+  }
+
   const budget = { deadline: performance.now() + 20000, nodes: 0, maxNodes: 40000, bytes: 0, maxBytes: 15_000_000, omitted: 0 };
 
   return {
+    scopedSelector: selector,
     frameworks: detectFrameworks(),
     css: captureCSS(),
     pseudoElements: capturePseudoElements(),
     colors: extractColorPalette(),
     layout: captureLayout(),
     typography: captureTypography(),
-    assets: captureAssets(document),
-    dom: captureElement(document.body, budget),
+    assets: captureAssets(root),
+    dom: captureElement(root, budget),
     domBudget: { nodesVisited: budget.nodes, omittedSubtrees: budget.omitted, approxBytes: budget.bytes },
   };
+}
+
+// listElementsInBrowser — runs INSIDE the page, same rules as captureInBrowser
+// above (self-contained, no outer-scope references). Produces a flat
+// inventory of clickable/notable elements with a stable CSS selector for
+// each, so the agent can match a natural-language description ("o botão de
+// login", "aquele card verde") to a real element BEFORE running a scoped
+// capture with --selector. This is the headless equivalent of the original
+// extension's click-to-pick UI — since there's no human clicking a live
+// page here, the agent picks from this list (cross-referenced with the
+// full-page screenshot) instead.
+export function listElementsInBrowser() {
+  function buildRobustSelector(el) {
+    if (!(el instanceof Element)) return null;
+    if (el === document.body) return 'body';
+    const parts = [];
+    let node = el;
+    while (node && node.nodeType === Node.ELEMENT_NODE && node !== document.body) {
+      if (node.id) { parts.unshift('#' + CSS.escape(node.id)); node = null; break; }
+      const parent = node.parentElement;
+      let part = node.tagName.toLowerCase();
+      if (parent) {
+        const siblings = Array.from(parent.children).filter(c => c.tagName === node.tagName);
+        if (siblings.length > 1) part += `:nth-of-type(${siblings.indexOf(node) + 1})`;
+      }
+      parts.unshift(part);
+      node = parent;
+    }
+    if (parts[0] && !parts[0].startsWith('#')) parts.unshift('body');
+    return parts.join(' > ') || 'body';
+  }
+
+  const CANDIDATE_SELECTOR = [
+    'button', 'a', 'input', 'select', 'textarea', '[role]',
+    'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'img', 'svg',
+    'header', 'nav', 'footer', 'section', 'main', 'form',
+    '[class*="btn"]', '[class*="button"]', '[class*="card"]', '[onclick]',
+  ].join(', ');
+
+  const seen = new Set();
+  const results = [];
+  document.querySelectorAll(CANDIDATE_SELECTOR).forEach(el => {
+    if (typeof el.checkVisibility === 'function' && !el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })) return;
+    const rect = el.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return;
+    const selector = buildRobustSelector(el);
+    if (!selector || seen.has(selector)) return;
+    seen.add(selector);
+    const text = (el.innerText || el.getAttribute('aria-label') || el.getAttribute('alt') || el.getAttribute('placeholder') || '')
+      .trim().replace(/\s+/g, ' ').slice(0, 80);
+    results.push({
+      selector,
+      tag: el.tagName.toLowerCase(),
+      text,
+      id: el.id || null,
+      classes: [...el.classList].slice(0, 4).join(' ') || null,
+      role: el.getAttribute('role') || null,
+      rect: {
+        x: Math.round(rect.x), y: Math.round(rect.y + window.scrollY),
+        w: Math.round(rect.width), h: Math.round(rect.height),
+      },
+    });
+  });
+  return results.slice(0, 400);
 }

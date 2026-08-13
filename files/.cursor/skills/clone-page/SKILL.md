@@ -23,9 +23,25 @@ Everything now happens in one pass, driven by you (the agent), with no manual do
   ```
   (Only Chromium is needed — don't install the full browser matrix.)
 
-## 1. Capture
+## 1. Decide the scope BEFORE capturing: whole page, one element, or just its style
 
-Run the capture script from the project root, pointing at the target URL:
+Read what the user actually asked for — this changes which command you run:
+
+- **Whole page** ("clona esse site", "extrai o design de `<url>`"): go straight to step 1a below.
+- **One element/component** ("clica nesse botão e clona ele", "só esse card", "extrai só o
+  header"): the user named something specific, not the whole page. Do **not** guess a CSS
+  selector from the description alone — go to step 1b first to get a real one.
+- **Just the style of one element** ("pega só o estilo desse botão", "qual a cor de fundo desse
+  card", "só quero o CSS desse elemento"): same as above, but finish with `--styles-only` (step
+  1c) — it's faster and skips downloading assets/DOM you don't need.
+
+There's no live browser a human is pointing at here (unlike the old extension's click-to-pick
+UI) — you resolve "that element" by cross-referencing `elements.json` (a selector inventory) and
+the full-page screenshot against what the user described, THEN run a scoped capture with the
+resolved selector. Never invent a selector without checking it exists on the page first — a wrong
+guess either captures the wrong thing silently or fails outright.
+
+### 1a. Whole-page capture
 
 ```
 node .cursor/skills/clone-page/scripts/capture.mjs "<url>" clone-capture/<slug>
@@ -38,26 +54,81 @@ node .cursor/skills/clone-page/scripts/capture.mjs "<url>" clone-capture/<slug>
   and downloads real asset bytes (images/fonts/css), not just URLs.
 - If it errors on navigation (timeout, blocked, etc.), read the printed warning and decide whether
   to retry with `--timeout=90000` or a narrower URL before giving up.
+- Then skip to step 2.
+
+### 1b. Find the right element first (required before any scoped capture)
+
+```
+node .cursor/skills/clone-page/scripts/capture.mjs "<url>" clone-capture/<slug> --list-elements
+```
+
+This writes `clone-capture/<slug>/elements.json` — a flat list of clickable/notable elements
+(`button`, `a`, `input`, headings, `img`, `svg`, `nav`/`header`/`footer`/`section`, anything with a
+`btn`/`button`/`card`-like class, `[role]`, `[onclick]`), each with a stable CSS `selector`, `tag`,
+visible `text`, `classes`, and `rect` (position/size). It also writes
+`screenshots/full-page.png` for visual context.
+
+Match the user's description against this list using text content, tag, classes, and position
+(cross-check against the screenshot if there's ambiguity — e.g. two elements with similar text at
+different `rect.y`). Pick the single best `selector`. If nothing plausible matches, say so instead
+of guessing — the site may render that element only after an interaction (hover/click) this
+headless pass didn't trigger, which is out of scope (see limitations).
+
+### 1c. Scoped capture with the resolved selector
+
+Full element capture (DOM subtree + its assets + a cropped `screenshots/element.png`):
+
+```
+node .cursor/skills/clone-page/scripts/capture.mjs "<url>" clone-capture/<slug> --selector="<selector>"
+```
+
+Style-only (fast path — just that element's computed styles + `::before`/`::after`, no DOM tree,
+no asset downloads, writes `element-styles.json` instead of the full file set):
+
+```
+node .cursor/skills/clone-page/scripts/capture.mjs "<url>" clone-capture/<slug> --selector="<selector>" --styles-only
+```
+
+- If the script exits with `selector_not_found`, the picked selector doesn't match anything —
+  re-check `elements.json` (the page may have changed, or the element only appears after scroll/
+  interaction) rather than retrying the same selector.
+- `--selector` and `--styles-only` both reuse the same `<slug>` folder as `--list-elements` was
+  run in — outputs land alongside `elements.json`, they don't overwrite it.
 
 ## 2. Read what was captured
 
-Read, in this order, from the output folder (`clone-capture/<slug>/`):
+**If you ran `--styles-only` (step 1c):** everything you need is in
+`clone-capture/<slug>/element-styles.json` — `selector`, `tag`, `rect`, the computed `styles`
+object, `pseudos` (`::before`/`::after`), and `textContent`. That's the whole answer for a "qual o
+estilo desse elemento" / "pega a cor desse botão" request — skip the rest of this section and go
+straight to applying those exact values wherever the user wants them (a CSS rule, a Tailwind
+class, a design-token file). Don't invent additional structure or assets for a styles-only ask.
 
-1. `capture-manifest.json` — run metadata and the honest **knownLimitations** list. Always carry
-   these into your final report to the user; don't imply higher fidelity than what was captured.
+**Otherwise** (whole-page or scoped-element capture), read, in this order, from the output folder
+(`clone-capture/<slug>/`):
+
+1. `capture-manifest.json` — run metadata, `scopedSelector` (null for whole-page captures), and
+   the honest **knownLimitations** list. Always carry these into your final report to the user;
+   don't imply higher fidelity than what was captured.
 2. `layout.json`, `frameworks.json`, `typography.json`, `colors.json` — page-level facts that
-   steer the reconstruction (detected stack, fonts, palette, viewport).
-3. `screenshots/full-page.png` and the `screenshots/checkpoint-*.png` files — look at these as the
-   visual ground truth before writing any code.
+   steer the reconstruction (detected stack, fonts, palette, viewport). Still page-wide even for a
+   scoped capture — useful shared context (tokens, detected framework) for the one element too.
+3. `screenshots/full-page.png` and the `screenshots/checkpoint-*.png` files for whole-page
+   context; `screenshots/element.png` (scoped captures only) is the tight crop of just the picked
+   element — use it as the visual ground truth for that element specifically.
 4. `dom.json` — the structural source of truth (tag, attrs, computed `styles`, `rect`, children,
-   text nodes, `::before`/`::after` as `pseudos`). Nodes with `omitted: true` mean the DOM budget
-   was hit — call this out if it affects a section that matters.
+   text nodes, `::before`/`::after` as `pseudos`). For a scoped capture this is rooted at the
+   picked element, not `<body>` — don't reconstruct the whole page when the user only asked for
+   one component. Nodes with `omitted: true` mean the DOM budget was hit — call this out if it
+   affects a part that matters.
 5. `css.json` — keyframes, custom properties (CSS variables), media query breakpoints, and every
-   readable CSS rule. `inaccessibleSheets` lists cross-origin stylesheets that couldn't be read.
+   readable CSS rule (page-wide, not scoped — use it to resolve variables/keyframes the element's
+   styles reference). `inaccessibleSheets` lists cross-origin stylesheets that couldn't be read.
 6. `assets-manifest.json` — maps every original asset URL to its local path under
    `clone-capture/<slug>/assets/<hash>.<ext>` (or a `status` explaining why it wasn't downloaded:
-   `too_large`, `http_error`, `failed`, `skipped_budget`). **Always use the local path when one
-   exists — never hotlink the original site's URLs in the output.**
+   `too_large`, `http_error`, `failed`, `skipped_budget`). For a scoped capture this only covers
+   assets referenced by that element's subtree. **Always use the local path when one exists —
+   never hotlink the original site's URLs in the output.**
 
 ## 3. Decide the output format from the CURRENT project, not a fixed default
 
@@ -78,6 +149,37 @@ Before writing anything, check what this project already is:
 
 ## 4. Reconstruct
 
+**Capturing is not the deliverable.** A run that ends with "here's `clone-capture/<slug>/` and
+here are the limitations" without any actual HTML/CSS/component code is an unfinished job, not a
+cautious one — the whole point of this skill is producing working code the user can look at
+immediately, informed by the captured data. Always finish this step before reporting back.
+
+**Don't try to reconstruct a whole complex page in a single pass.** A real homepage can have
+thousands of DOM nodes in `dom.json` — attempting to translate all of it into markup in one shot
+is exactly what produces the "faltou coisas" result (silently dropped sections, wrong sizes,
+approximated instead of faithful). Instead:
+1. Run `--list-elements` and look at `screenshots/full-page.png` to identify the page's top-level
+   sections (hero, nav, feature grid, footer, etc. — usually `header`/`nav`/`section`/`footer` or
+   large direct children of `<body>`/`<main>`).
+2. Reconstruct ONE section at a time: run a scoped `--selector` capture for that section (step 1c),
+   build it, visually check it against that section's `screenshots/element.png`, THEN move to the
+   next section. This mirrors how the original extension's human operator worked section-by-section
+   with the picker — you're doing the same thing, just driven by `--list-elements` instead of a
+   click.
+3. Only skip straight to a single whole-page capture (step 1a) for genuinely simple/short pages
+   where one pass is realistic — use judgment based on `elements.json`'s size and the screenshot.
+
+**Get every image's on-page size right — this is the #1 cause of "veio pequeno".** Downloading the
+asset file is not enough: an `<img>` with no explicit size renders at the file's intrinsic
+resolution, which is often smaller (or a completely different aspect ratio) than how it's
+displayed on the original site. For every image node in `dom.json`, explicitly set the rendered
+box to that node's `rect.w` / `rect.h` (via width/height attributes, CSS width/height, or the
+framework's Image component sizing) and match `styles.objectFit` / `styles.objectPosition` when
+present — never let the browser fall back to the downloaded file's native size.
+
+- For a scoped capture (`--selector` was used), only create/edit the one component the user
+  asked about — don't rebuild the surrounding page just because page-level `css.json`/
+  `colors.json` were also read for context.
 - Walk `dom.json` and emit matching markup/JSX, preserving element order, text content, and
   structure (including mixed text/element children).
 - Translate each node's `styles` object into the target styling approach (CSS rules, Tailwind
@@ -91,15 +193,17 @@ Before writing anything, check what this project already is:
   extra DOM nodes.
 - Point every `src`/`href`/`background-image`/`font-face url()` at the local path from
   `assets-manifest.json`. If an asset's status isn't `ok`, keep the original remote URL as a
-  fallback and flag it in your summary instead of silently breaking the layout.
+  fallback and flag it in your summary instead of silently breaking the layout. `assets-manifest.json`
+  entries are tagged with `kind` (`image`/`font`/`video`) — public `<video>` files and their
+  posters download like any other asset now, so embed the local video file, not the original URL.
 - Inline SVGs (`dom.json` nodes with `svgContent`) should be embedded as real inline SVG, not
   screenshotted.
 
 ## 5. Verify before declaring done
 
 - Run/build the project (or open the generated static file) and take a screenshot or visually
-  compare it against `screenshots/full-page.png`. Note real differences instead of assuming a
-  pixel-perfect match.
+  compare it against `screenshots/full-page.png` (or `screenshots/element.png` for a scoped
+  capture). Note real differences instead of assuming a pixel-perfect match.
 - Summarize for the user: what was captured and reconstructed faithfully, and what's listed under
   `capture-manifest.json`'s `knownLimitations` (canvas/WebGL, DRM/auth video, cross-origin CSS,
   closed shadow roots, budget-omitted nodes) so expectations stay honest.
