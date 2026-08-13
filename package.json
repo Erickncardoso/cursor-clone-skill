@@ -1,0 +1,20 @@
+{
+  "name": "cursor-clone-skill",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Instala a skill clone-page (regra do Cursor + capturador Playwright, sem extensão/ZIP) no projeto atual, automaticamente, ao rodar npm install.",
+  "bin": {
+    "cursor-clone-skill": "setup.mjs"
+  },
+  "scripts": {
+    "postinstall": "node setup.mjs"
+  },
+  "files": [
+    "setup.mjs",
+    "files/**/*"
+  ],
+  "dependencies": {
+    "playwright": "^1.47.0"
+  }
+}
