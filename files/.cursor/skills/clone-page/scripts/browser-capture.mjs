@@ -18,7 +18,7 @@
 export function captureInBrowser(opts) {
   const { selector = null, stylesOnly = false } = opts || {};
   const CRITICAL_STYLES = [
-    'display', 'position', 'flexDirection', 'flexWrap', 'alignItems', 'justifyContent',
+    'display', 'boxSizing', 'position', 'flexDirection', 'flexWrap', 'alignItems', 'justifyContent',
     'gridTemplateColumns', 'gridTemplateRows', 'gridColumn', 'gridRow', 'gap', 'columnGap', 'rowGap',
     'width', 'height', 'minWidth', 'maxWidth', 'minHeight', 'maxHeight',
     'margin', 'marginTop', 'marginRight', 'marginBottom', 'marginLeft',

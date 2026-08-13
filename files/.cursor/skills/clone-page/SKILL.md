@@ -205,13 +205,58 @@ ITS POSITIONED PARENT (parent's `rect.x`/`rect.y` subtracted from the child's), 
 case), don't use absolute positioning from `rect` at all — reproduce it via normal document flow /
 flexbox / grid order instead, which is what keeps layered sections from collapsing into each other.
 
+**Never dump literal `width`/`height` onto auto-sized content elements (buttons, pills, tags,
+badges, nav links) — this is what causes "botão cortado" / text clipped or overlapping its
+label.** For a button/link/badge whose size comes from padding + text rather than a deliberately
+fixed box (the common case for CTAs), `node.styles.width`/`node.styles.height` in `dom.json` are
+the CSS **content-box** size at capture time under the browser's default `box-sizing:
+content-box` — NOT the element's rendered/visual size. `node.rect.w`/`node.rect.h` (from
+`getBoundingClientRect()`) is always the true visual size, padding and border included. Applying
+`styles.width`/`styles.height` literally as CSS `width`/`height` while also applying `padding`
+double-subtracts the padding and renders a box smaller than the real button, clipping the label.
+Fix:
+1. For text-driven components (buttons, pills, tags, chips — heuristic: has text content, has
+   padding, tag is `a`/`button`/`span`/`label`/`div[role=button]`), don't set explicit
+   `width`/`height` at all. Apply `padding`, `font-size`, `font-family`, `line-height`,
+   `border-radius`, etc. from `node.styles` and let the box size itself from content — this is how
+   the original almost always achieves that size too.
+2. If a node genuinely needs an explicit size (fixed-dimension containers, avatars, image
+   wrappers), use `node.rect.w`/`node.rect.h`, not `node.styles.width`/`node.styles.height`, and
+   set `box-sizing: border-box` on the rule so padding isn't added on top again.
+3. `node.styles.boxSizing` is captured — when it's `content-box` (the default), `styles.width`/
+   `styles.height` genuinely exclude padding/border; don't treat them as interchangeable with
+   `rect.w`/`rect.h`.
+
+**Interactive components (carousels, tabs, accordions) need real behavior, not just whichever
+state was active at capture time.** The capture is one static DOM snapshot — it never clicks,
+hovers, or advances a slide — so a gallery's dots/slides/tabs all land in `dom.json` as inert
+markup, with only the item that was current/active at capture time actually visible; the site's
+own JS driving transitions (autoplay timers, dot↔slide sync) isn't extracted (see
+`capture-manifest.json`'s `knownLimitations`), which is why dots/arrows look "dead" if rendered
+as-is. When `dom.json`/`elements.json` shows this pattern — repeated sibling "slide" nodes plus a
+parallel row of dot/tab/indicator controls (look for classes/attrs like `slide`, `dot`,
+`indicator`, `tab`, `carousel`, `gallery`, `active`/`current`/`is-active`, `aria-selected`,
+`role="tablist"`/`role="tab"`) — don't ship it as static markup:
+1. Identify which item was active/current at capture time (the node carrying the
+   `active`/`current`/`aria-selected="true"`-type class or attribute) and keep it as the initial
+   visible state.
+2. Write minimal interaction code (vanilla JS, or the framework's native state — e.g. React
+   `useState`) that wires each dot/tab click to show the matching slide and update the active
+   class/`aria-selected` on the controls. A plain "click a dot → set active index → toggle
+   classes" implementation is enough — you're building a working equivalent, not extracting the
+   original bundle.
+3. Say so plainly in your summary: autoplay timing, transition easing/animation, and any original
+   JS behavior beyond click-to-switch are not reproduced — flag it like any other
+   `knownLimitations` item instead of implying exact parity.
+
 - For a scoped capture (`--selector` was used), only create/edit the one component the user
   asked about — don't rebuild the surrounding page just because page-level `css.json`/
   `colors.json` were also read for context.
 - Walk `dom.json` and emit matching markup/JSX, preserving element order, text content, and
   structure (including mixed text/element children).
 - Translate each node's `styles` object into the target styling approach (CSS rules, Tailwind
-  classes, or styled-components) using the literal captured values — don't round or guess.
+  classes, or styled-components) using the literal captured values — don't round or guess, EXCEPT
+  for `width`/`height` on auto-sized content elements per the callout above.
 - Wire up colors/typography from `colors.json` / `typography.json` as shared tokens
   (CSS variables, Tailwind theme extension, or a constants file) when the project has a place for
   them; otherwise inline them.
@@ -235,6 +280,12 @@ flexbox / grid order instead, which is what keeps layered sections from collapsi
 - Check that every background-image + foreground-image pair you saw overlapping in the screenshot
   actually rendered as two distinct layers in the output, not one merged/missing image — this is
   the most common visual regression from this workflow.
+- Check every button/pill/tag's text isn't clipped or overlapping its own background — if it is,
+  you likely applied a literal `styles.width`/`styles.height` where the element should have been
+  left to size itself from padding + content (see step 4).
+- If the page had a carousel/tabs/accordion, click through it in the running result and confirm
+  dots/tabs actually switch slides — a set of dots that doesn't respond to clicks means the
+  interaction wiring from step 4 was skipped.
 - Summarize for the user: what was captured and reconstructed faithfully, and what's listed under
   `capture-manifest.json`'s `knownLimitations` (canvas/WebGL, DRM/auth video, cross-origin CSS,
   closed shadow roots, budget-omitted nodes) so expectations stay honest.

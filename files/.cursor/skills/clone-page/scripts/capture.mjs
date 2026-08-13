@@ -403,6 +403,8 @@ async function main() {
         : 'No screen recording was produced for this run (disabled by default for --list-elements/--styles-only, or --no-video was passed) — re-run with --video to force one.',
       'Closed shadow roots are inaccessible by browser design and are not represented in dom.json.',
       'GSAP/Framer Motion/Lottie/scroll-library state reflects the DOM at capture time, not full timeline/animation logic.',
+      'Interactive JS behavior (carousel dot/slide sync, tab switching, accordions, autoplay timers) is not extracted — only the DOM/CSS state of whichever slide/tab was active at capture time is captured. The reconstruction needs its own minimal interaction script to make dots/tabs functional (see SKILL.md step 4).',
+      'dom.json node.styles.width/height are the CSS content-box size at capture time (getComputedStyle), NOT the rendered visual size — use node.rect.w/rect.h (getBoundingClientRect, always the true visual size) instead when an element genuinely needs an explicit size, especially for padded buttons/pills/tags.',
       'Nodes beyond the DOM budget (domBudget.omittedSubtrees) are marked but not expanded — re-run with a narrower page/section if this is non-zero and matters.',
     ],
   };
